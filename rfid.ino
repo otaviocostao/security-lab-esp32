@@ -37,8 +37,8 @@ const char* DEVICE_ID_PREFIX = "ESP32_"; // Defina o prefixo desejado aqui
 
 // Constantes do Servo Motor
 const int SERVO_PIN = 16;
-const int ANGULO_FECHADO = 0;
-const int ANGULO_ABERTO = 90;
+const int ANGULO_FECHADO = 70; 
+const int ANGULO_ABERTO = 130;
 Servo servo;
 
 // --- Objetos Globais ---
@@ -56,6 +56,7 @@ RealtimeDatabase database;             // Objeto do Realtime Database (inicializ
 // Identificador do Dispositivo
 String deviceMAC = "";          // Guarda o MAC original (XX:XX:...)
 String firebaseDeviceID = "";   // Guarda o ID FINAL do dispositivo (Prefixo + MAC formatado)
+String devicePath = "";         // Guarda o caminho do dispositivo no Firebase: /devices/{firebaseDeviceID}
 
 // Controle
 bool firebaseReady = false;         // Flag para indicar se o Firebase está pronto
@@ -64,8 +65,46 @@ const unsigned long readInterval = 2000; // Intervalo mínimo entre leituras (ms
 
 // --- Controle dos LEDs e Estado da Porta ---
 unsigned long doorOpenTimerStart = 0;          // Timestamp de quando a porta foi aberta
-const unsigned long doorOpenDuration = 5000; // Porta fica "aberta" por 5 segundos
+const unsigned long doorOpenDuration = 2000; // Porta fica "aberta" por X segundos
 bool isDoorOpen = false;                       // Flag para indicar se a porta está "aberta"
+
+// --- Função para atualizar o status e last_status_change do dispositivo no Firebase ---
+void updateDeviceStatusFirebase(const String& newStatus) {
+    if (firebaseReady && !firebaseDeviceID.isEmpty() && WiFi.status() == WL_CONNECTED) {
+        if (devicePath.isEmpty()) { // Recalcula se necessário
+            devicePath = "/devices/" + firebaseDeviceID;
+        }
+        
+        object_t statusUpdateJson;
+        JsonWriter writer;
+
+        // Placeholder para o timestamp do servidor
+        object_t serverTimestampPlaceholder;
+        JsonWriter tsWriter;
+        tsWriter.create(serverTimestampPlaceholder, ".sv", "timestamp");
+
+        // Criar os campos para o JSON de atualização
+        object_t statusField, lastStatusChangeField;
+        writer.create(statusField, "status", newStatus.c_str());
+        writer.create(lastStatusChangeField, "last_status_change", serverTimestampPlaceholder); // MODIFICADO: Adiciona last_status_change
+
+        // Juntar os campos no JSON final
+        writer.join(statusUpdateJson, 2, statusField, lastStatusChangeField);
+
+        Serial.printf("Tentando atualizar status para '%s' e last_status_change em %s\n", newStatus.c_str(), devicePath.c_str());
+        if (database.update(aClient, devicePath, statusUpdateJson)) {
+            Serial.printf("Status do dispositivo atualizado para '%s' e last_status_change no Firebase com sucesso.\n", newStatus.c_str());
+        } else {
+            Serial.printf(">> Erro ao atualizar status para '%s' e last_status_change no Firebase: %s (Code %d)\n",
+                          newStatus.c_str(),
+                          aClient.lastError().message().c_str(),
+                          aClient.lastError().code());
+        }
+    } else {
+        Serial.printf("Não foi possível atualizar status para '%s': Firebase não pronto, ID do dispositivo vazio ou WiFi desconectado.\n", newStatus.c_str());
+    }
+}
+
 
 // --- Função Setup ---
 void setup() {
@@ -140,6 +179,7 @@ void setup() {
     formattedMAC.replace(":", "");
     formattedMAC.toUpperCase();
     firebaseDeviceID = String(DEVICE_ID_PREFIX) + formattedMAC;
+    devicePath = "/devices/" + firebaseDeviceID; // Define o devicePath globalmente
     
     digitalWrite(LED_PORTA_ABERTA_PIN, HIGH);
     delay(500);
@@ -151,15 +191,11 @@ void setup() {
     delay(500);
     digitalWrite(LED_PORTA_ABERTA_PIN, HIGH);
     delay(500);
-    digitalWrite(LED_PORTA_ABERTA_PIN, LOW);
-
-    // REMOVER ESSA PARTE DO CODIGO (APENAS UM TESTE)
-    servo.write(ANGULO_ABERTO);
-    delay(2000);
-    servo.write(ANGULO_FECHADO);
+    digitalWrite(LED_PORTA_ABERTA_PIN, LOW); 
 
     Serial.printf("Endereço MAC (Original): %s\n", deviceMAC.c_str());
     Serial.printf("ID Final do Dispositivo para Firebase (com prefixo): %s\n", firebaseDeviceID.c_str());
+    Serial.printf("Caminho do dispositivo no Firebase: %s\n", devicePath.c_str());
 
 
   } else {
@@ -209,7 +245,6 @@ void setup() {
 
     // --- INÍCIO: Lógica de Registro/Atualização do Dispositivo no Firebase ---
     if (!firebaseDeviceID.isEmpty()) {
-        String devicePath = "/devices/" + firebaseDeviceID;
         Serial.printf("Verificando/Registrando dispositivo no Firebase em: %s\n", devicePath.c_str());
 
         bool deviceExists = database.exists(aClient, devicePath);
@@ -224,64 +259,50 @@ void setup() {
 
             if (!deviceExists) {
                 Serial.println("Dispositivo não encontrado. Registrando novo dispositivo...");
-                object_t actionReqField, fwField, lastOnlineField, statusField, ramField, tempField, latencyField, cpuField, newDeviceJson;
+                object_t actionReqField, fwField, lastOnlineField, statusField, lastStatusChangeField, ramField, tempField, latencyField, cpuField, newDeviceJson; // Adicionado lastStatusChangeField
                 JsonWriter writer;
 
                 writer.create(actionReqField, "action_requested_at", timestampPlaceholder);
                 writer.create(fwField, "firmware_version", FIRMWARE_VERSION);
                 writer.create(lastOnlineField, "last_online", timestampPlaceholder);
-                writer.create(statusField, "status", "online");
+                writer.create(statusField, "status", "locked"); 
+                writer.create(lastStatusChangeField, "last_status_change", timestampPlaceholder); // MODIFICADO: Adiciona last_status_change
                 writer.create(ramField, "ram_usage", MOCKUP_RAM_USAGE);
                 writer.create(tempField, "temperature", MOCKUP_TEMPERATURE);
                 writer.create(latencyField, "latency", MOCKUP_LATENCY);
                 writer.create(cpuField, "cpu_usage", MOCKUP_CPU_USAGE);
-                writer.join(newDeviceJson, 8, actionReqField, fwField, lastOnlineField, statusField, ramField, tempField, latencyField, cpuField);
+                writer.join(newDeviceJson, 9, actionReqField, fwField, lastOnlineField, statusField, lastStatusChangeField, ramField, tempField, latencyField, cpuField); // Contagem atualizada para 9
 
                 Serial.println("Enviando dados do novo dispositivo...");
                 bool creationSuccess = database.set<object_t>(aClient, devicePath, newDeviceJson);
 
                 if (creationSuccess) {
-                    Serial.println("Novo dispositivo registrado com sucesso no Firebase.");
+                    Serial.println("Novo dispositivo registrado com sucesso no Firebase (status 'locked', last_status_change atualizado).");
                 } else {
                     Serial.printf(">> Erro ao registrar novo dispositivo no Firebase: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
                 }
             } else {
-                Serial.println("Dispositivo já registrado. Atualizando status e informações...");
-                bool updateSuccess = true;
+                Serial.println("Dispositivo já registrado. Atualizando informações...");
+                
+                object_t updateData;
+                JsonWriter writer;
+                object_t lastOnlineField, statusField, lastStatusChangeField, ramField, tempField, latencyField, cpuField, fwField; // Adicionado lastStatusChangeField
 
-                if (!database.set<object_t>(aClient, devicePath + "/last_online", timestampPlaceholder)) {
-                    Serial.printf(">> Erro ao atualizar last_online: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
-                if (!database.set<String>(aClient, devicePath + "/status", "online")) {
-                    Serial.printf(">> Erro ao atualizar status: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
-                if (!database.set<int>(aClient, devicePath + "/ram_usage", MOCKUP_RAM_USAGE)) {
-                    Serial.printf(">> Erro ao atualizar ram_usage: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
-                if (!database.set<int>(aClient, devicePath + "/temperature", MOCKUP_TEMPERATURE)) {
-                    Serial.printf(">> Erro ao atualizar temperature: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
-                if (!database.set<int>(aClient, devicePath + "/latency", MOCKUP_LATENCY)) {
-                    Serial.printf(">> Erro ao atualizar latency: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
-                if (!database.set<int>(aClient, devicePath + "/cpu_usage", MOCKUP_CPU_USAGE)) {
-                    Serial.printf(">> Erro ao atualizar cpu_usage: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
-                if (!database.set<String>(aClient, devicePath + "/firmware_version", FIRMWARE_VERSION)) {
-                    Serial.printf(">> Erro ao atualizar firmware_version: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
-                    updateSuccess = false;
-                }
+                writer.create(lastOnlineField, "last_online", timestampPlaceholder);
+                writer.create(statusField, "status", "locked");
+                writer.create(lastStatusChangeField, "last_status_change", timestampPlaceholder); // MODIFICADO: Adiciona last_status_change
+                writer.create(ramField, "ram_usage", MOCKUP_RAM_USAGE);
+                writer.create(tempField, "temperature", MOCKUP_TEMPERATURE);
+                writer.create(latencyField, "latency", MOCKUP_LATENCY);
+                writer.create(cpuField, "cpu_usage", MOCKUP_CPU_USAGE);
+                writer.create(fwField, "firmware_version", FIRMWARE_VERSION);
 
-                if (updateSuccess) {
-                    Serial.println("Informações do dispositivo atualizadas com sucesso.");
+                writer.join(updateData, 8, lastOnlineField, statusField, lastStatusChangeField, ramField, tempField, latencyField, cpuField, fwField); // Contagem atualizada para 8
+
+                if (database.update(aClient, devicePath, updateData)) {
+                     Serial.println("Informações do dispositivo (status 'locked', last_status_change, etc.) atualizadas com sucesso.");
                 } else {
-                    Serial.println("Falha ao atualizar algumas informações do dispositivo.");
+                    Serial.printf(">> Falha ao atualizar informações do dispositivo: %s (Code %d)\n", aClient.lastError().message().c_str(), aClient.lastError().code());
                 }
             }
         }
@@ -318,11 +339,10 @@ void loop() {
     digitalWrite(LED_PORTA_ABERTA_PIN, LOW);
     digitalWrite(LED_PORTA_FECHADA_PIN, HIGH);
 
-     // Abre o servo motor
     servo.write(ANGULO_FECHADO);
-
     isDoorOpen = false;
     doorOpenTimerStart = 0; // Reset timer
+    updateDeviceStatusFirebase("locked"); 
   }
 
 
@@ -332,14 +352,12 @@ void loop() {
   lastRead = millis();
 
   if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) {
-    // Se não há cartão E a porta não está no período "aberta" pelo timer
     if (!isDoorOpen) {
-         digitalWrite(LED_PORTA_FECHADA_PIN, HIGH); // Garante que LED de fechada esteja aceso
-         digitalWrite(LED_PORTA_ABERTA_PIN, LOW);   // E LED de aberta apagado
-          // Abre o servo motor
-          servo.write(ANGULO_FECHADO);
+         digitalWrite(LED_PORTA_FECHADA_PIN, HIGH); 
+         digitalWrite(LED_PORTA_ABERTA_PIN, LOW);  
+         servo.write(ANGULO_FECHADO);
     }
-    delay(50); // Pequena pausa se nenhum cartão for detectado
+    delay(50); 
     return;
   }
 
@@ -347,7 +365,7 @@ void loop() {
   Serial.println(F("\n--- Cartão Detectado ---"));
 
   String cardUID_for_path = "";
-  String cardUID_for_value = ""; // Para log visual
+  String cardUID_for_value = ""; 
   for (byte i = 0; i < mfrc522.uid.size; i++) {
     if (mfrc522.uid.uidByte[i] < 0x10) cardUID_for_path += "0";
     cardUID_for_path += String(mfrc522.uid.uidByte[i], HEX);
@@ -363,28 +381,28 @@ void loop() {
 
   String block4Data = "";
   MFRC522::MIFARE_Key key;
-  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF; // Chave padrão
+  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF; 
   byte blockAddr = 4;
-  byte bufferSize = 18; // Buffer para leitura (16 bytes de dados + 2 CRC)
+  byte bufferSize = 18; 
   byte readBuffer[bufferSize];
-  MFRC522::StatusCode status;
+  MFRC522::StatusCode status_rfid; // Renomeado para evitar conflito com status da porta
 
   Serial.printf("Autenticando Bloco %d...\n", blockAddr);
-  status = mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, blockAddr, &key, &(mfrc522.uid));
+  status_rfid = mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, blockAddr, &key, &(mfrc522.uid));
 
-  if (status == MFRC522::STATUS_OK) {
+  if (status_rfid == MFRC522::STATUS_OK) {
     Serial.println("Autenticação OK.");
     Serial.printf("Lendo Bloco %d...\n", blockAddr);
-    status = mfrc522.MIFARE_Read(blockAddr, readBuffer, &bufferSize);
-    if (status == MFRC522::STATUS_OK) {
+    status_rfid = mfrc522.MIFARE_Read(blockAddr, readBuffer, &bufferSize);
+    if (status_rfid == MFRC522::STATUS_OK) {
       Serial.print(F("Dados Lidos do Bloco 4 (Hex):"));
-      for (uint8_t i = 0; i < 16; i++) { // MIFARE Classic blocos têm 16 bytes
+      for (uint8_t i = 0; i < 16; i++) { 
         Serial.printf(readBuffer[i] < 0x10 ? " 0%X" : " %X", readBuffer[i]);
-        if (readBuffer[i] >= 0x20 && readBuffer[i] <= 0x7E) { // Caracteres ASCII imprimíveis
+        if (readBuffer[i] >= 0x20 && readBuffer[i] <= 0x7E) { 
           block4Data += (char)readBuffer[i];
         }
       }
-      block4Data.trim(); // Remove espaços em branco extras
+      block4Data.trim(); 
       Serial.println();
       if (block4Data.length() > 0) {
         Serial.printf("Dados convertidos para String (Bloco 4): '%s'\n", block4Data.c_str());
@@ -392,58 +410,56 @@ void loop() {
         Serial.println("Nenhum caractere ASCII imprimível encontrado no Bloco 4.");
       }
     } else {
-      Serial.print(F("Falha na leitura do Bloco 4: ")); Serial.println(mfrc522.GetStatusCodeName(status));
+      Serial.print(F("Falha na leitura do Bloco 4: ")); Serial.println(mfrc522.GetStatusCodeName(status_rfid));
     }
   } else {
-    Serial.print(F("Falha na autenticação do Bloco 4: ")); Serial.println(mfrc522.GetStatusCodeName(status));
+    Serial.print(F("Falha na autenticação do Bloco 4: ")); Serial.println(mfrc522.GetStatusCodeName(status_rfid));
   }
 
   // --- Interação com Firebase ---
   if (firebaseReady && WiFi.status() == WL_CONNECTED && !firebaseDeviceID.isEmpty()) {
 
-    bool cardIsEffectivelyAuthorized = false; // Flag para o resultado da autorização
+    bool cardIsEffectivelyAuthorized = false; 
 
-    // --- NOVA ETAPA: Verificação de Autorização do Cartão ---
-    String authPath = "/devices/" + firebaseDeviceID + "/authorized_tags/" + cardUID_for_path;
-    Serial.printf("Verificando autorização do cartão em Firebase: %s\n", authPath.c_str());
+    String authPathFb = "/devices/" + firebaseDeviceID + "/authorized_tags/" + cardUID_for_path; 
+    Serial.printf("Verificando autorização do cartão em Firebase: %s\n", authPathFb.c_str());
 
-    bool isAuthorizedFirebaseValue = database.get<bool>(aClient, authPath);
+    bool isAuthorizedFirebaseValue = database.get<bool>(aClient, authPathFb);
 
     if (aClient.lastError().code() == 0) {
-        if (isAuthorizedFirebaseValue) {
+        if (isAuthorizedFirebaseValue) { 
             Serial.println(">>> Porta Aberta! Acesso Autorizado. <<<");
             cardIsEffectivelyAuthorized = true;
         } else {
-            Serial.println(">>> Acesso Negado! Cartão explicitamente não autorizado no Firebase (valor false). <<<");
+            Serial.println(">>> Acesso Negado! Cartão não encontrado em 'authorized_tags' ou valor é 'false'. <<<");
             cardIsEffectivelyAuthorized = false;
         }
     } else {
-        Serial.printf(">>> Acesso Negado! Não foi possível verificar a autorização do cartão no Firebase (Code: %d): %s\n",
+        Serial.printf(">>> Acesso Negado! Erro ao verificar autorização do cartão no Firebase (Code: %d): %s\n",
                       aClient.lastError().code(),
                       aClient.lastError().message().c_str());
         Serial.println("Verifique se o cartão está cadastrado em 'authorized_tags' com valor 'true' ou se há problemas de permissão/conexão.");
         cardIsEffectivelyAuthorized = false;
     }
 
-    // --- Controle dos LEDs baseado na autorização ---
     if (cardIsEffectivelyAuthorized) {
-        Serial.println("ACIONANDO LEDs: Abrindo porta...");
+        Serial.println("ACIONANDO LEDs e SERVO: Abrindo porta...");
         digitalWrite(LED_PORTA_ABERTA_PIN, HIGH);
         digitalWrite(LED_PORTA_FECHADA_PIN, LOW);
          
-        // Abre o servo motor
         servo.write(ANGULO_ABERTO);
         isDoorOpen = true;
-        doorOpenTimerStart = millis(); // Inicia temporizador da porta aberta
+        doorOpenTimerStart = millis(); 
+        updateDeviceStatusFirebase("unlocked"); 
     } else {
-        if (!isDoorOpen) {
-            Serial.println("ACIONANDO LEDs: Porta permanece fechada (acesso negado).");
+        if (!isDoorOpen) { 
+            Serial.println("ACIONANDO LEDs e SERVO: Porta permanece fechada (acesso negado).");
             digitalWrite(LED_PORTA_ABERTA_PIN, LOW);
             digitalWrite(LED_PORTA_FECHADA_PIN, HIGH);
-             // Abre o servo motor
             servo.write(ANGULO_FECHADO);
+            updateDeviceStatusFirebase("locked"); 
         } else {
-            Serial.println("ACIONANDO LEDs: Acesso negado, mas porta já estava aberta (timer). Nenhuma mudança imediata nos LEDs.");
+            Serial.println("ACIONANDO LEDs: Acesso negado, mas porta já estava aberta (timer). Nenhuma mudança imediata nos LEDs/Servo/Status Firebase.");
         }
     }
 
@@ -460,16 +476,15 @@ void loop() {
         if (!userExists) {
             Serial.println("Usuário não encontrado no Firebase. Criando novo registro de usuário...");
 
-            object_t timestampPlaceholderUser, statusFieldUser, roleFieldUser, createdAtFieldUser, rfidTagIdFieldUser, newUserJson; // Adicionado rfidTagIdFieldUser
+            object_t timestampPlaceholderUser, statusFieldUser, roleFieldUser, createdAtFieldUser, rfidTagIdFieldUser, newUserJson; 
             JsonWriter userWriter;
 
             userWriter.create(timestampPlaceholderUser, ".sv", "timestamp");
             userWriter.create(statusFieldUser, "status", "inactive"); 
             userWriter.create(roleFieldUser, "role", "new_card");   
             userWriter.create(createdAtFieldUser, "created_at", timestampPlaceholderUser);
-            userWriter.create(rfidTagIdFieldUser, "rfidTagId", cardUID_for_path.c_str()); // NOVO CAMPO
+            userWriter.create(rfidTagIdFieldUser, "rfidTagId", cardUID_for_path.c_str()); 
 
-            // Atualizar a contagem para 4 e adicionar o novo campo
             userWriter.join(newUserJson, 4, statusFieldUser, roleFieldUser, createdAtFieldUser, rfidTagIdFieldUser);
 
             Serial.printf("Enviando dados do novo usuário para: %s\n", userPath.c_str());
@@ -544,8 +559,8 @@ void loop() {
   }
 
   // --- Finalização da Leitura RFID ---
-  mfrc522.PICC_HaltA();      // Coloca o cartão em modo HALT para que não seja lido novamente imediatamente
-  mfrc522.PCD_StopCrypto1(); // Para a criptografia no PCD
+  mfrc522.PICC_HaltA();      
+  mfrc522.PCD_StopCrypto1(); 
   Serial.println(F("--- Fim da Leitura do Cartão ---"));
 
 } // Fim do loop()
